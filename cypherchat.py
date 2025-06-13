@@ -81,6 +81,7 @@ class CypherChat:
         self.general_messages = []
         self.unread_count = 0
         self.session = None
+        self.ws = None
         self.current_peer = None
         self.console = Console()
         self.load_contacts()
@@ -174,6 +175,70 @@ class CypherChat:
         # Zone de saisie
         self.layout["footer"].update(Panel("Tapez votre message (ou 'exit' pour quitter)", style="bold yellow"))
 
+    async def connect_websocket(self):
+        """Établit la connexion WebSocket"""
+        if self.ws:
+            await self.ws.close()
+        
+        try:
+            ws_url = f"ws://{self.current_peer}/ws"
+            self.ws = await self.session.ws_connect(ws_url)
+            
+            # Enregistre le WebSocket
+            await self.ws.send_json({
+                "type": "register",
+                "public_key": self.crypto.get_public_key_hex()
+            })
+            
+            # Démarre la tâche de réception des messages
+            asyncio.create_task(self.receive_websocket_messages())
+        except Exception as e:
+            self.console.print(f"[red]Error connecting to websocket:[/red] {str(e)}")
+
+    async def receive_websocket_messages(self):
+        """Reçoit les messages WebSocket"""
+        try:
+            async for msg in self.ws:
+                if msg.type == aiohttp.WSMsgType.TEXT:
+                    data = json.loads(msg.data)
+                    
+                    if data["type"] == "new_message":
+                        # Nouveau message reçu
+                        message = data["message"]
+                        self.messages.append(message)
+                        self.unread_count += 1
+                        self.console.print(f"\n[bold green]Nouveau message de @{message['username']}[/bold green]")
+                        self.console.print(f"💬 {message['message']}")
+                        self.console.print("─" * 40)
+                    
+                    elif data["type"] == "peers_update":
+                        # Mise à jour de la liste des pairs
+                        for peer in data["peers"]:
+                            if peer["key"] not in self.contacts:
+                                self.contacts[peer["key"]] = {
+                                    "username": peer["username"],
+                                    "status": peer["status"]
+                                }
+                                self.save_contacts()
+                    
+                    elif data["type"] == "peer_status":
+                        # Mise à jour du statut d'un pair
+                        if data["key"] in self.contacts:
+                            self.contacts[data["key"]]["status"] = data["status"]
+                            self.save_contacts()
+                            self.console.print(f"\n[bold]Statut de @{self.contacts[data['key']]['username']} : {data['status']}[/bold]")
+                
+                elif msg.type == aiohttp.WSMsgType.CLOSED:
+                    break
+                elif msg.type == aiohttp.WSMsgType.ERROR:
+                    break
+        except Exception as e:
+            self.console.print(f"[red]Error receiving websocket messages:[/red] {str(e)}")
+        finally:
+            if self.ws:
+                await self.ws.close()
+                self.ws = None
+
     async def connect_to_network(self):
         """Connecte au réseau P2P"""
         if self.session:
@@ -233,9 +298,12 @@ class CypherChat:
                         if peer["key"] not in self.contacts:
                             self.contacts[peer["key"]] = {
                                 "username": peer["username"],
-                                "status": "connecté"
+                                "status": peer["status"]
                             }
                     self.save_contacts()
+
+                    # Connecte au WebSocket
+                    await self.connect_websocket()
                 else:
                     self.console.print("[red]Error:[/red] Failed to connect to peer")
         except Exception as e:
