@@ -6,6 +6,7 @@ import argparse
 from rich.console import Console
 from rich.panel import Panel
 from datetime import datetime
+import aiohttp
 
 class CypherNode:
     def __init__(self, port=9001):
@@ -23,25 +24,29 @@ class CypherNode:
 
         try:
             async for msg in ws:
-                if msg.type == web.WSMsgType.TEXT:
+                if msg.type == aiohttp.WSMsgType.TEXT:
                     data = json.loads(msg.data)
-                    if data.get("type") == "register":
-                        # Enregistre le WebSocket pour un utilisateur
+                    
+                    if data["type"] == "register":
+                        # Enregistre le WebSocket avec la clé publique
                         public_key = data.get("public_key")
-                        if public_key in self.peers:
-                            self.peers[public_key]["ws"] = ws
-                            # Envoie la liste des pairs connectés
-                            await ws.send_json({
-                                "type": "peers_update",
-                                "peers": [
-                                    {
-                                        "key": key,
-                                        "username": info["username"],
-                                        "status": "online"
-                                    }
-                                    for key, info in self.peers.items()
-                                ]
-                            })
+                        if public_key:
+                            # Notifie tous les WebSockets de la mise à jour des pairs
+                            for ws in self.websockets:
+                                try:
+                                    await ws.send_json({
+                                        "type": "peers_update",
+                                        "peers": [
+                                            {
+                                                "key": key,
+                                                "username": info["username"],
+                                                "status": info["status"]
+                                            }
+                                            for key, info in self.peers.items()
+                                        ]
+                                    })
+                                except Exception as e:
+                                    print(f"Error sending peers update: {e}")
                 elif msg.type == web.WSMsgType.CLOSE:
                     break
         except Exception as e:
@@ -114,59 +119,59 @@ class CypherNode:
             return web.json_response({"error": str(e)}, status=500)
 
     async def handle_message(self, request):
-        """Gère la réception d'un message"""
+        """Gère l'envoi de messages"""
         try:
             data = await request.json()
-            to_key = data.get("to")
-            from_key = data.get("from")
+            recipient_key = data.get("recipient")
             message = data.get("message")
             username = data.get("username")
 
-            if not all([to_key, from_key, message, username]):
-                return web.json_response({"error": "Missing required fields"}, status=400)
+            if not all([recipient_key, message, username]):
+                return web.Response(status=400, text="Données manquantes")
 
             # Stocke le message
-            if to_key not in self.messages:
-                self.messages[to_key] = []
+            if recipient_key not in self.messages:
+                self.messages[recipient_key] = []
             
-            message_data = {
-                "from": from_key,
+            self.messages[recipient_key].append({
+                "from": username,
                 "message": message,
-                "username": username,
                 "timestamp": datetime.now().isoformat()
-            }
-            self.messages[to_key].append(message_data)
+            })
 
-            # Envoie le message via WebSocket si le destinataire est connecté
-            if to_key in self.peers and self.peers[to_key].get("ws"):
+            # Notifie tous les WebSockets connectés
+            for ws in self.websockets:
                 try:
-                    await self.peers[to_key]["ws"].send_json({
+                    await ws.send_json({
                         "type": "new_message",
-                        "message": message_data
+                        "message": {
+                            "username": username,
+                            "message": message,
+                            "timestamp": datetime.now().isoformat()
+                        }
                     })
                 except Exception as e:
-                    self.console.print(f"[red]Error sending message via websocket:[/red] {str(e)}")
+                    print(f"Error sending to websocket: {e}")
 
-            return web.json_response({"status": "message received"})
+            return web.Response(status=200, text="Message envoyé")
         except Exception as e:
-            self.console.print(f"[red]Error in handle_message:[/red] {str(e)}")
-            return web.json_response({"error": str(e)}, status=500)
+            print(f"Error handling message: {e}")
+            return web.Response(status=500, text=str(e))
 
-    async def handle_get_messages(self, request):
-        """Gère la récupération des messages"""
+    async def handle_messages(self, request):
+        """Récupère les messages d'un utilisateur"""
         try:
-            key = request.query.get("key")
-            if not key:
-                return web.json_response({"error": "Missing key parameter"}, status=400)
+            data = await request.json()
+            public_key = data.get("public_key")
 
-            messages = self.messages.get(key, [])
-            # Vide la boîte de réception après lecture
-            self.messages[key] = []
+            if not public_key:
+                return web.Response(status=400, text="Clé publique manquante")
 
-            return web.json_response({"messages": messages})
+            messages = self.messages.get(public_key, [])
+            return web.json_response(messages)
         except Exception as e:
-            self.console.print(f"[red]Error in handle_get_messages:[/red] {str(e)}")
-            return web.json_response({"error": str(e)}, status=500)
+            print(f"Error getting messages: {e}")
+            return web.Response(status=500, text=str(e))
 
     async def handle_list_peers(self, request):
         """Gère la liste des pairs connectés"""
@@ -190,7 +195,7 @@ class CypherNode:
         app = web.Application()
         app.router.add_post("/connect", self.handle_connect)
         app.router.add_post("/message", self.handle_message)
-        app.router.add_get("/messages", self.handle_get_messages)
+        app.router.add_get("/messages", self.handle_messages)
         app.router.add_get("/peers", self.handle_list_peers)
         app.router.add_get("/ws", self.handle_websocket)
 
