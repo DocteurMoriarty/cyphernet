@@ -51,7 +51,8 @@ class CypherChat:
         self.console.print("  5. 👥 Contacts")
         self.console.print("  6. 🔐 My keys")
         self.console.print("  7. 👀 Liste des pairs")
-        self.console.print("  8. 🚪 Quit")
+        self.console.print("  8. ➕ Ajouter un contact")
+        self.console.print("  9. 🚪 Quit")
 
     def create_chat_layout(self):
         """Crée la mise en page du chat"""
@@ -287,14 +288,64 @@ class CypherChat:
     async def show_contacts(self):
         """Affiche la liste des contacts"""
         self.console.print("\n[bold]Contacts:[/bold]")
-        for contact, status in self.contacts.items():
-            self.console.print(f"- @{contact} ({status})")
+        if not self.contacts:
+            self.console.print("Aucun contact")
+            return
+            
+        for i, (key, status) in enumerate(self.contacts.items(), 1):
+            self.console.print(f"{i}. {key[:8]}... ({status})")
 
     async def show_keys(self):
         """Affiche les clés de l'utilisateur"""
         self.console.print("\n[bold]My Keys:[/bold]")
         self.console.print(f"Public Key: {self.crypto.get_public_key_hex()}")
         self.console.print(f"Private Key: {self.crypto.private_key.private_bytes(serialization.Encoding.Raw, serialization.PrivateFormat.Raw, serialization.NoEncryption()).hex()}")
+
+    async def add_contact(self):
+        """Ajoute un nouveau contact"""
+        self.console.print("\n[bold]Ajouter un contact[/bold]")
+        self.console.print("1. Depuis la liste des pairs")
+        self.console.print("2. Avec une clé publique")
+        
+        choice = Prompt.ask("Choisissez une option", choices=["1", "2"])
+        
+        if choice == "1":
+            # Affiche la liste des pairs
+            try:
+                async with self.session.get(f"http://{self.current_peer}/peers") as response:
+                    if response.status == 200:
+                        data = await response.json()
+                        if not data["peers"]:
+                            self.console.print("Aucun pair disponible")
+                            return
+                            
+                        self.console.print("\n[bold]Pairs disponibles:[/bold]")
+                        for i, peer in enumerate(data["peers"], 1):
+                            self.console.print(f"{i}. {peer['key'][:8]}... ({peer['address']})")
+                        
+                        try:
+                            peer_choice = int(Prompt.ask("\nChoisissez un pair (numéro)"))
+                            if 1 <= peer_choice <= len(data["peers"]):
+                                peer = data["peers"][peer_choice - 1]
+                                self.contacts[peer["key"]] = "connecté"
+                                self.console.print(f"[green]✓[/green] Contact ajouté: {peer['key'][:8]}...")
+                            else:
+                                self.console.print("[red]Error:[/red] Choix invalide")
+                        except ValueError:
+                            self.console.print("[red]Error:[/red] Entrée invalide")
+                    else:
+                        self.console.print("[red]Error:[/red] Failed to get peers list")
+            except Exception as e:
+                self.console.print(f"[red]Error:[/red] {str(e)}")
+        
+        elif choice == "2":
+            # Ajout manuel avec une clé publique
+            key = Prompt.ask("\nEntrez la clé publique du contact")
+            if len(key) == 64:  # Vérifie que la clé a la bonne longueur
+                self.contacts[key] = "manuel"
+                self.console.print(f"[green]✓[/green] Contact ajouté: {key[:8]}...")
+            else:
+                self.console.print("[red]Error:[/red] Clé publique invalide")
 
     async def main_loop(self):
         """Boucle principale de l'application"""
@@ -307,7 +358,7 @@ class CypherChat:
                 await self.check_messages()
                 
                 self.display_menu()
-                choice = Prompt.ask("\n> ", choices=["1", "2", "3", "4", "5", "6", "7", "8"])
+                choice = Prompt.ask("\n> ", choices=["1", "2", "3", "4", "5", "6", "7", "8", "9"])
 
                 if choice == "1":
                     await self.connect_to_network()
@@ -324,6 +375,8 @@ class CypherChat:
                 elif choice == "7":
                     await self.list_peers()
                 elif choice == "8":
+                    await self.add_contact()
+                elif choice == "9":
                     if self.session:
                         await self.session.close()
                     self.console.print("\n[bold red]Goodbye! 👋[/bold red]")
