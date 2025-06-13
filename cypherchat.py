@@ -12,17 +12,71 @@ from rich.layout import Layout
 from rich.live import Live
 from rich.table import Table
 from cryptography.hazmat.primitives import serialization
-from crypto import CypherCrypto
-import time
-from cryptography.hazmat.primitives import x25519
+from cryptography.hazmat.primitives.asymmetric import rsa, padding
 from cryptography.fernet import Fernet
+import time
 import base64
+
+class Crypto:
+    def __init__(self):
+        # Génère une paire de clés RSA
+        self.private_key = rsa.generate_private_key(
+            public_exponent=65537,
+            key_size=2048
+        )
+        self.public_key = self.private_key.public_key()
+
+    def get_public_key_hex(self):
+        """Retourne la clé publique en format hexadécimal"""
+        return self.public_key.public_bytes(
+            encoding=serialization.Encoding.PEM,
+            format=serialization.PublicFormat.SubjectPublicKeyInfo
+        ).hex()
+
+    def encrypt_message(self, message: str, recipient_public_key_hex: str) -> str:
+        """Chiffre un message avec la clé publique du destinataire"""
+        try:
+            # Convertit la clé publique hexadécimale en bytes
+            recipient_public_key_bytes = bytes.fromhex(recipient_public_key_hex)
+            recipient_public_key = serialization.load_pem_public_key(recipient_public_key_bytes)
+            
+            # Chiffre le message avec la clé publique
+            encrypted = recipient_public_key.encrypt(
+                message.encode(),
+                padding.OAEP(
+                    mgf=padding.MGF1(algorithm=hashes.SHA256()),
+                    algorithm=hashes.SHA256(),
+                    label=None
+                )
+            )
+            return base64.b64encode(encrypted).decode()
+        except Exception as e:
+            raise Exception(f"Erreur de chiffrement: {str(e)}")
+
+    def decrypt_message(self, encrypted_message: str) -> str:
+        """Déchiffre un message avec la clé privée"""
+        try:
+            # Décode le message chiffré
+            encrypted = base64.b64decode(encrypted_message)
+            
+            # Déchiffre avec la clé privée
+            decrypted = self.private_key.decrypt(
+                encrypted,
+                padding.OAEP(
+                    mgf=padding.MGF1(algorithm=hashes.SHA256()),
+                    algorithm=hashes.SHA256(),
+                    label=None
+                )
+            )
+            return decrypted.decode()
+        except Exception as e:
+            raise Exception(f"Erreur de déchiffrement: {str(e)}")
 
 class CypherChat:
     def __init__(self):
         self.console = Console()
         self.username = None
-        self.crypto = CypherCrypto()
+        self.crypto = Crypto()
         self.connected = False
         self.contacts = {}
         self.messages = []
@@ -199,7 +253,7 @@ class CypherChat:
                     f"http://{self.current_peer}/message",
                     json={
                         "to": recipient_key,
-                        "from": self.crypto.public_key.hex(),
+                        "from": self.crypto.get_public_key_hex(),
                         "message": encrypted
                     }
                 ) as response:
@@ -275,4 +329,4 @@ class CypherChat:
 
 if __name__ == "__main__":
     chat = CypherChat()
-    asyncio.run(chat.main_loop()) 
+    asyncio.run(chat.main_loop())
