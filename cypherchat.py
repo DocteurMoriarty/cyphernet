@@ -8,8 +8,12 @@ from rich.console import Console
 from rich.prompt import Prompt
 from rich.panel import Panel
 from rich import print as rprint
+from rich.layout import Layout
+from rich.live import Live
+from rich.table import Table
 from cryptography.hazmat.primitives import serialization
 from crypto import CypherCrypto
+import time
 
 class CypherChat:
     def __init__(self):
@@ -19,9 +23,12 @@ class CypherChat:
         self.connected = False
         self.contacts = {}
         self.messages = []
+        self.general_messages = []
         self.current_peer = None
         self.session = None
         self.unread_count = 0
+        self.current_chat = None
+        self.layout = Layout()
 
     def display_welcome(self):
         """Affiche l'écran d'accueil"""
@@ -38,12 +45,144 @@ class CypherChat:
         """Affiche le menu principal"""
         self.console.print("\n[bold]Available commands:[/bold]")
         self.console.print("  1. 📡 Connect to network")
-        self.console.print("  2. 💬 Send a message")
-        self.console.print(f"  3. 📥 Inbox {f'({self.unread_count})' if self.unread_count > 0 else ''}")
-        self.console.print("  4. 👥 Contacts")
-        self.console.print("  5. 🔐 My keys")
-        self.console.print("  6. 👀 Liste des pairs")
-        self.console.print("  7. 🚪 Quit")
+        self.console.print("  2. 💬 Chat privé")
+        self.console.print("  3. 🌐 Chat général")
+        self.console.print(f"  4. 📥 Inbox {f'({self.unread_count})' if self.unread_count > 0 else ''}")
+        self.console.print("  5. 👥 Contacts")
+        self.console.print("  6. 🔐 My keys")
+        self.console.print("  7. 👀 Liste des pairs")
+        self.console.print("  8. 🚪 Quit")
+
+    def create_chat_layout(self):
+        """Crée la mise en page du chat"""
+        self.layout.split(
+            Layout(name="header", size=3),
+            Layout(name="main"),
+            Layout(name="footer", size=3)
+        )
+        
+        self.layout["main"].split_row(
+            Layout(name="contacts", ratio=1),
+            Layout(name="chat", ratio=3)
+        )
+
+    def update_chat_display(self):
+        """Met à jour l'affichage du chat"""
+        if not self.current_chat:
+            return
+
+        # En-tête
+        self.layout["header"].update(Panel(f"Chat avec {self.current_chat[:8]}...", style="bold blue"))
+
+        # Liste des contacts
+        contacts_table = Table(show_header=False, box=None)
+        contacts_table.add_column("Contacts")
+        for key, status in self.contacts.items():
+            style = "green" if key == self.current_chat else "white"
+            contacts_table.add_row(f"• {key[:8]}...", style=style)
+        self.layout["contacts"].update(Panel(contacts_table, title="Contacts"))
+
+        # Zone de chat
+        chat_table = Table(show_header=False, box=None)
+        chat_table.add_column("Messages")
+        for msg in self.messages:
+            if msg["sender_key"] == self.current_chat or msg["recipient_key"] == self.current_chat:
+                sender = "Vous" if msg["sender_key"] == self.crypto.get_public_key_hex() else msg["sender_key"][:8]
+                chat_table.add_row(f"{sender}: {msg['decrypted']}")
+        self.layout["chat"].update(Panel(chat_table, title="Messages"))
+
+        # Zone de saisie
+        self.layout["footer"].update(Panel("Tapez votre message (ou 'exit' pour quitter)", style="bold yellow"))
+
+    async def private_chat(self):
+        """Gère le chat privé"""
+        if not self.connected or not self.session:
+            self.console.print("[red]Error:[/red] Not connected to network")
+            return
+
+        # Affiche la liste des contacts
+        self.console.print("\n[bold]Contacts disponibles:[/bold]")
+        for i, (key, status) in enumerate(self.contacts.items(), 1):
+            self.console.print(f"{i}. {key[:8]}... ({status})")
+
+        try:
+            choice = int(Prompt.ask("\nChoisissez un contact (numéro)"))
+            if 1 <= choice <= len(self.contacts):
+                self.current_chat = list(self.contacts.keys())[choice - 1]
+            else:
+                self.console.print("[red]Error:[/red] Choix invalide")
+                return
+        except ValueError:
+            self.console.print("[red]Error:[/red] Entrée invalide")
+            return
+
+        self.create_chat_layout()
+        with Live(self.layout, refresh_per_second=4) as live:
+            while True:
+                self.update_chat_display()
+                message = Prompt.ask("")
+                
+                if message.lower() == 'exit':
+                    self.current_chat = None
+                    break
+
+                try:
+                    message_packet = self.crypto.create_message_packet(self.current_chat, message)
+                    async with self.session.post(f"http://{self.current_peer}/relay", 
+                        json=message_packet) as response:
+                        if response.status == 200:
+                            message_packet["decrypted"] = message
+                            self.messages.append(message_packet)
+                            self.update_chat_display()
+                        else:
+                            self.console.print("[red]Error:[/red] Failed to send message")
+                except Exception as e:
+                    self.console.print(f"[red]Error:[/red] {str(e)}")
+
+    async def general_chat(self):
+        """Gère le chat général"""
+        if not self.connected or not self.session:
+            self.console.print("[red]Error:[/red] Not connected to network")
+            return
+
+        self.create_chat_layout()
+        self.layout["header"].update(Panel("Chat Général", style="bold blue"))
+        
+        with Live(self.layout, refresh_per_second=4) as live:
+            while True:
+                # Liste des utilisateurs
+                users_table = Table(show_header=False, box=None)
+                users_table.add_column("Utilisateurs")
+                for key, status in self.contacts.items():
+                    users_table.add_row(f"• {key[:8]}...")
+                self.layout["contacts"].update(Panel(users_table, title="Utilisateurs en ligne"))
+
+                # Messages du chat général
+                chat_table = Table(show_header=False, box=None)
+                chat_table.add_column("Messages")
+                for msg in self.general_messages:
+                    sender = "Vous" if msg["sender_key"] == self.crypto.get_public_key_hex() else msg["sender_key"][:8]
+                    chat_table.add_row(f"{sender}: {msg['decrypted']}")
+                self.layout["chat"].update(Panel(chat_table, title="Messages"))
+
+                # Zone de saisie
+                self.layout["footer"].update(Panel("Tapez votre message (ou 'exit' pour quitter)", style="bold yellow"))
+                
+                message = Prompt.ask("")
+                if message.lower() == 'exit':
+                    break
+
+                try:
+                    # Envoie le message à tous les pairs
+                    for peer_key in self.contacts.keys():
+                        message_packet = self.crypto.create_message_packet(peer_key, message)
+                        async with self.session.post(f"http://{self.current_peer}/relay", 
+                            json=message_packet) as response:
+                            if response.status == 200:
+                                message_packet["decrypted"] = message
+                                self.general_messages.append(message_packet)
+                except Exception as e:
+                    self.console.print(f"[red]Error:[/red] {str(e)}")
 
     async def connect_to_network(self):
         """Gère la connexion au réseau"""
@@ -157,46 +296,6 @@ class CypherChat:
         self.console.print(f"Public Key: {self.crypto.get_public_key_hex()}")
         self.console.print(f"Private Key: {self.crypto.private_key.private_bytes(serialization.Encoding.Raw, serialization.PrivateFormat.Raw, serialization.NoEncryption()).hex()}")
 
-    async def send_message(self):
-        """Gère l'envoi de messages"""
-        if not self.connected or not self.session:
-            self.console.print("[red]Error:[/red] Not connected to network")
-            return
-
-        # Affiche d'abord la liste des contacts
-        if self.contacts:
-            self.console.print("\n[bold]Contacts disponibles:[/bold]")
-            for key, status in self.contacts.items():
-                self.console.print(f"- {key[:8]}... ({status})")
-
-        recipient = Prompt.ask("\nTo (username or key)")
-        message = Prompt.ask("Message")
-
-        try:
-            # Vérifie si le destinataire est dans les contacts
-            if recipient in self.contacts:
-                recipient_key = recipient
-            else:
-                # Si c'est un nom d'utilisateur, cherche la clé correspondante
-                recipient_key = next((k for k, v in self.contacts.items() if v == recipient), None)
-                if not recipient_key:
-                    self.console.print("[red]Error:[/red] Destinataire non trouvé")
-                    return
-
-            # Crée le paquet de message chiffré
-            message_packet = self.crypto.create_message_packet(recipient_key, message)
-            
-            # Envoie le message au relai
-            async with self.session.post(f"http://{self.current_peer}/relay", 
-                json=message_packet) as response:
-                if response.status == 200:
-                    self.console.print("[green]✓[/green] Message chiffré")
-                    self.console.print("[green]→[/green] Envoyé via relai")
-                else:
-                    self.console.print("[red]Error:[/red] Failed to send message")
-        except Exception as e:
-            self.console.print(f"[red]Error:[/red] {str(e)}")
-
     async def main_loop(self):
         """Boucle principale de l'application"""
         self.username = Prompt.ask("\nEnter your username")
@@ -208,21 +307,23 @@ class CypherChat:
                 await self.check_messages()
                 
                 self.display_menu()
-                choice = Prompt.ask("\n> ", choices=["1", "2", "3", "4", "5", "6", "7"])
+                choice = Prompt.ask("\n> ", choices=["1", "2", "3", "4", "5", "6", "7", "8"])
 
                 if choice == "1":
                     await self.connect_to_network()
                 elif choice == "2":
-                    await self.send_message()
+                    await self.private_chat()
                 elif choice == "3":
-                    await self.show_inbox()
+                    await self.general_chat()
                 elif choice == "4":
-                    await self.show_contacts()
+                    await self.show_inbox()
                 elif choice == "5":
-                    await self.show_keys()
+                    await self.show_contacts()
                 elif choice == "6":
-                    await self.list_peers()
+                    await self.show_keys()
                 elif choice == "7":
+                    await self.list_peers()
+                elif choice == "8":
                     if self.session:
                         await self.session.close()
                     self.console.print("\n[bold red]Goodbye! 👋[/bold red]")
