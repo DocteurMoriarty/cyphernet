@@ -386,39 +386,55 @@ class CypherChat:
             else:
                 self.console.print("[red]Error:[/red] Clé publique invalide")
 
-    async def send_message(self, recipient_key, message):
-        """Envoie un message chiffré"""
-        try:
-            if not self.current_peer:
-                self.console.print("[red]Error:[/red] Non connecté au réseau")
-                return
+    async def send_message(self):
+        """Envoie un message à un contact"""
+        if not self.contacts:
+            self.console.print("Aucun contact disponible")
+            return
 
-            # Chiffre le message
-            encrypted_message = self.crypto.encrypt_message(message, recipient_key)
-            
-            # Envoie le message
-            async with self.session.post(
-                f"http://{self.current_peer}/message",
-                json={
-                    "recipient": recipient_key,
-                    "message": encrypted_message,
-                    "username": self.username
-                }
-            ) as response:
-                if response.status == 200:
-                    self.console.print("[green]✓[/green] Message envoyé")
-                    # Envoie aussi via WebSocket pour la mise à jour en temps réel
-                    if self.ws:
-                        await self.ws.send_json({
-                            "type": "new_message",
-                            "message": {
-                                "username": self.username,
-                                "message": message,
-                                "timestamp": datetime.now().isoformat()
-                            }
-                        })
-                else:
-                    self.console.print("[red]Error:[/red] Échec de l'envoi du message")
+        self.console.print("\n[bold]💬 Contacts disponibles:[/bold]")
+        for i, (key, info) in enumerate(self.contacts.items(), 1):
+            username = info.get("username", "Inconnu")
+            status = info.get("status", "connecté")
+            self.console.print(f"{i}. @{username} ({key[:8]}...) - {status}")
+
+        try:
+            choice = int(Prompt.ask("\nChoisissez un contact (numéro)"))
+            if 1 <= choice <= len(self.contacts):
+                recipient_key = list(self.contacts.keys())[choice - 1]
+                recipient_info = self.contacts[recipient_key]
+                message = Prompt.ask(f"\nMessage pour @{recipient_info['username']}")
+                
+                # Chiffre le message
+                encrypted_message = self.crypto.encrypt_message(message, recipient_key)
+                
+                # Envoie le message
+                async with self.session.post(
+                    f"http://{self.current_peer}/message",
+                    json={
+                        "recipient": recipient_key,
+                        "message": encrypted_message,
+                        "username": self.username
+                    }
+                ) as response:
+                    if response.status == 200:
+                        self.console.print("[green]✓[/green] Message envoyé")
+                        # Envoie aussi via WebSocket pour la mise à jour en temps réel
+                        if self.ws:
+                            await self.ws.send_json({
+                                "type": "new_message",
+                                "message": {
+                                    "username": self.username,
+                                    "message": message,
+                                    "timestamp": datetime.now().isoformat()
+                                }
+                            })
+                    else:
+                        self.console.print("[red]Error:[/red] Échec de l'envoi du message")
+            else:
+                self.console.print("[red]Error:[/red] Choix invalide")
+        except ValueError:
+            self.console.print("[red]Error:[/red] Entrée invalide")
         except Exception as e:
             self.console.print(f"[red]Error:[/red] {str(e)}")
 
