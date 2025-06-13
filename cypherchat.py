@@ -29,6 +29,24 @@ class CypherChat:
         self.unread_count = 0
         self.current_chat = None
         self.layout = Layout()
+        self.load_contacts()
+
+    def load_contacts(self):
+        """Charge les contacts depuis le fichier"""
+        try:
+            if os.path.exists("contacts.json"):
+                with open("contacts.json", "r") as f:
+                    self.contacts = json.load(f)
+        except Exception as e:
+            self.console.print(f"[red]Error loading contacts:[/red] {str(e)}")
+
+    def save_contacts(self):
+        """Sauvegarde les contacts dans un fichier"""
+        try:
+            with open("contacts.json", "w") as f:
+                json.dump(self.contacts, f)
+        except Exception as e:
+            self.console.print(f"[red]Error saving contacts:[/red] {str(e)}")
 
     def display_welcome(self):
         """Affiche l'écran d'accueil"""
@@ -43,16 +61,13 @@ class CypherChat:
 
     def display_menu(self):
         """Affiche le menu principal"""
-        self.console.print("\n[bold]Available commands:[/bold]")
-        self.console.print("  1. 📡 Connect to network")
-        self.console.print("  2. 💬 Chat privé")
-        self.console.print("  3. 🌐 Chat général")
-        self.console.print(f"  4. 📥 Inbox {f'({self.unread_count})' if self.unread_count > 0 else ''}")
-        self.console.print("  5. 👥 Contacts")
-        self.console.print("  6. 🔐 My keys")
-        self.console.print("  7. 👀 Liste des pairs")
-        self.console.print("  8. ➕ Ajouter un contact")
-        self.console.print("  9. 🚪 Quit")
+        self.console.print("\n[bold]Menu:[/bold]")
+        self.console.print("1. Connecter")
+        self.console.print("2. Envoyer message")
+        self.console.print("3. Voir messages")
+        self.console.print("4. Voir contacts")
+        self.console.print("5. Voir clés")
+        self.console.print("6. Quitter")
 
     def create_chat_layout(self):
         """Crée la mise en page du chat"""
@@ -95,194 +110,119 @@ class CypherChat:
         # Zone de saisie
         self.layout["footer"].update(Panel("Tapez votre message (ou 'exit' pour quitter)", style="bold yellow"))
 
-    async def private_chat(self):
-        """Gère le chat privé"""
-        if not self.connected or not self.session:
-            self.console.print("[red]Error:[/red] Not connected to network")
+    async def connect_to_network(self):
+        """Connecte au réseau P2P"""
+        if self.session:
+            await self.session.close()
+            self.session = None
+
+        self.session = aiohttp.ClientSession()
+        
+        # Demande l'ID et la clé publique si déjà connecté
+        if os.path.exists("user_info.json"):
+            try:
+                with open("user_info.json", "r") as f:
+                    user_info = json.load(f)
+                    self.username = user_info.get("username")
+                    self.crypto.private_key = serialization.load_der_private_key(
+                        bytes.fromhex(user_info.get("private_key")),
+                        password=None
+                    )
+                    self.console.print(f"[green]✓[/green] Informations utilisateur chargées")
+            except Exception as e:
+                self.console.print(f"[red]Error loading user info:[/red] {str(e)}")
+        else:
+            self.username = Prompt.ask("\nEntrez votre nom d'utilisateur")
+
+        peer_address = Prompt.ask("\nEntrez l'adresse du pair", default="46.202.130.9:9001")
+        if ":" not in peer_address:
+            peer_address = f"{peer_address}:9001"
+
+        try:
+            async with self.session.post(
+                f"http://{peer_address}/connect",
+                json={
+                    "username": self.username,
+                    "public_key": self.crypto.public_key.hex()
+                }
+            ) as response:
+                if response.status == 200:
+                    data = await response.json()
+                    self.current_peer = peer_address
+                    self.connected = True
+                    self.console.print(f"[green]✓[/green] Connecté au réseau")
+                    
+                    # Sauvegarde les informations utilisateur
+                    user_info = {
+                        "username": self.username,
+                        "private_key": self.crypto.private_key.private_bytes(
+                            serialization.Encoding.DER,
+                            serialization.PrivateFormat.PKCS8,
+                            serialization.NoEncryption()
+                        ).hex()
+                    }
+                    with open("user_info.json", "w") as f:
+                        json.dump(user_info, f)
+                    
+                    # Ajoute les pairs connectés aux contacts
+                    for peer in data.get("peers", []):
+                        if peer["key"] not in self.contacts:
+                            self.contacts[peer["key"]] = "connecté"
+                    self.save_contacts()
+                else:
+                    self.console.print("[red]Error:[/red] Failed to connect to peer")
+        except Exception as e:
+            self.console.print(f"[red]Error:[/red] {str(e)}")
+
+    async def send_message(self):
+        """Envoie un message à un contact"""
+        if not self.contacts:
+            self.console.print("Aucun contact disponible")
             return
 
-        # Affiche la liste des contacts
-        self.console.print("\n[bold]Contacts disponibles:[/bold]")
+        self.console.print("\nContacts disponibles:")
         for i, (key, status) in enumerate(self.contacts.items(), 1):
             self.console.print(f"{i}. {key[:8]}... ({status})")
 
         try:
             choice = int(Prompt.ask("\nChoisissez un contact (numéro)"))
             if 1 <= choice <= len(self.contacts):
-                self.current_chat = list(self.contacts.keys())[choice - 1]
+                recipient_key = list(self.contacts.keys())[choice - 1]
+                message = Prompt.ask("\nEntrez votre message")
+                
+                encrypted = self.crypto.encrypt_message(message, recipient_key)
+                async with self.session.post(
+                    f"http://{self.current_peer}/message",
+                    json={
+                        "to": recipient_key,
+                        "from": self.crypto.public_key.hex(),
+                        "message": encrypted
+                    }
+                ) as response:
+                    if response.status == 200:
+                        self.console.print("[green]✓[/green] Message envoyé")
+                    else:
+                        self.console.print("[red]Error:[/red] Failed to send message")
             else:
                 self.console.print("[red]Error:[/red] Choix invalide")
-                return
         except ValueError:
             self.console.print("[red]Error:[/red] Entrée invalide")
-            return
-
-        self.create_chat_layout()
-        with Live(self.layout, refresh_per_second=4) as live:
-            while True:
-                self.update_chat_display()
-                message = Prompt.ask("")
-                
-                if message.lower() == 'exit':
-                    self.current_chat = None
-                    break
-
-                try:
-                    message_packet = self.crypto.create_message_packet(self.current_chat, message)
-                    async with self.session.post(f"http://{self.current_peer}/relay", 
-                        json=message_packet) as response:
-                        if response.status == 200:
-                            message_packet["decrypted"] = message
-                            self.messages.append(message_packet)
-                            self.update_chat_display()
-                        else:
-                            self.console.print("[red]Error:[/red] Failed to send message")
-                except Exception as e:
-                    self.console.print(f"[red]Error:[/red] {str(e)}")
-
-    async def general_chat(self):
-        """Gère le chat général"""
-        if not self.connected or not self.session:
-            self.console.print("[red]Error:[/red] Not connected to network")
-            return
-
-        self.create_chat_layout()
-        self.layout["header"].update(Panel("Chat Général", style="bold blue"))
-        
-        with Live(self.layout, refresh_per_second=4) as live:
-            while True:
-                # Liste des utilisateurs
-                users_table = Table(show_header=False, box=None)
-                users_table.add_column("Utilisateurs")
-                for key, status in self.contacts.items():
-                    users_table.add_row(f"• {key[:8]}...")
-                self.layout["contacts"].update(Panel(users_table, title="Utilisateurs en ligne"))
-
-                # Messages du chat général
-                chat_table = Table(show_header=False, box=None)
-                chat_table.add_column("Messages")
-                for msg in self.general_messages:
-                    sender = "Vous" if msg["sender_key"] == self.crypto.get_public_key_hex() else msg["sender_key"][:8]
-                    chat_table.add_row(f"{sender}: {msg['decrypted']}")
-                self.layout["chat"].update(Panel(chat_table, title="Messages"))
-
-                # Zone de saisie
-                self.layout["footer"].update(Panel("Tapez votre message (ou 'exit' pour quitter)", style="bold yellow"))
-                
-                message = Prompt.ask("")
-                if message.lower() == 'exit':
-                    break
-
-                try:
-                    # Envoie le message à tous les pairs
-                    for peer_key in self.contacts.keys():
-                        message_packet = self.crypto.create_message_packet(peer_key, message)
-                        async with self.session.post(f"http://{self.current_peer}/relay", 
-                            json=message_packet) as response:
-                            if response.status == 200:
-                                message_packet["decrypted"] = message
-                                self.general_messages.append(message_packet)
-                except Exception as e:
-                    self.console.print(f"[red]Error:[/red] {str(e)}")
-
-    async def connect_to_network(self):
-        """Gère la connexion au réseau"""
-        peer = Prompt.ask("\nEnter peer address [ip:port]")
-        
-        # Vérifie si le port est spécifié
-        if ':' not in peer:
-            peer = f"{peer}:9001"  # Port par défaut
-            
-        try:
-            if self.session:
-                await self.session.close()
-            
-            self.session = aiohttp.ClientSession()
-            self.console.print(f"[yellow]Tentative de connexion à {peer}...[/yellow]")
-            
-            async with self.session.post(f"http://{peer}/peer", 
-                json={"address": self.crypto.get_public_key_hex()},
-                timeout=10) as response:  # Ajout d'un timeout
-                if response.status == 200:
-                    self.current_peer = peer
-                    self.connected = True
-                    self.console.print(f"[green][+][/green] Connected to peer @{peer}")
-                    self.console.print("[green][+][/green] Network sync complete")
-                else:
-                    self.console.print(f"[red]Error:[/red] Failed to connect to peer (status: {response.status})")
-                    await self.session.close()
-                    self.session = None
-        except asyncio.TimeoutError:
-            self.console.print("[red]Error:[/red] Connection timeout")
-            if self.session:
-                await self.session.close()
-                self.session = None
-        except Exception as e:
-            self.console.print(f"[red]Error:[/red] {str(e)}")
-            if self.session:
-                await self.session.close()
-                self.session = None
-
-    async def list_peers(self):
-        """Affiche la liste des pairs connectés"""
-        if not self.connected or not self.session:
-            self.console.print("[red]Error:[/red] Not connected to network")
-            return
-
-        try:
-            async with self.session.get(f"http://{self.current_peer}/peers") as response:
-                if response.status == 200:
-                    data = await response.json()
-                    self.console.print("\n[bold]Pairs connectés:[/bold]")
-                    if not data["peers"]:
-                        self.console.print("Aucun pair connecté")
-                    else:
-                        for peer in data["peers"]:
-                            self.console.print(f"- {peer['key'][:8]}... ({peer['address']})")
-                            # Ajoute automatiquement aux contacts
-                            self.contacts[peer['key']] = "connecté"
-                else:
-                    self.console.print("[red]Error:[/red] Failed to get peers list")
         except Exception as e:
             self.console.print(f"[red]Error:[/red] {str(e)}")
 
-    async def check_messages(self):
-        """Vérifie les nouveaux messages"""
-        if not self.connected or not self.session:
-            return
-
-        try:
-            async with self.session.get(f"http://{self.current_peer}/messages?key={self.crypto.get_public_key_hex()}") as response:
-                if response.status == 200:
-                    data = await response.json()
-                    new_messages = data.get("messages", [])
-                    if new_messages:
-                        self.messages.extend(new_messages)
-                        self.unread_count += len(new_messages)
-        except Exception as e:
-            self.console.print(f"[red]Error checking messages:[/red] {str(e)}")
-
-    async def show_inbox(self):
-        """Affiche la boîte de réception"""
+    async def show_messages(self):
+        """Affiche les messages reçus"""
         if not self.messages:
-            self.console.print("\n[bold]Inbox:[/bold]")
             self.console.print("Aucun message")
             return
 
-        self.console.print(f"\n[bold]Inbox ({len(self.messages)} messages):[/bold]")
+        self.console.print("\nMessages:")
         for msg in self.messages:
-            try:
-                decrypted = self.crypto.decrypt_message(
-                    msg["encrypted_message"], 
-                    msg["sender_key"]
-                )
-                self.console.print(f"🔐 From: {msg['sender_key'][:8]}...")
-                self.console.print(f"🕒 {msg['timestamp']}")
-                self.console.print(f'"{decrypted}"')
-                self.console.print("─" * 40)
-            except Exception as e:
-                self.console.print(f"[red]Error decrypting message:[/red] {str(e)}")
-        
+            self.console.print(f"\nDe: {msg['from'][:8]}...")
+            self.console.print(f"Message: {msg['decrypted']}")
+            self.console.print(f"Date: {msg['timestamp']}")
+            self.console.print("-" * 40)
+
         self.unread_count = 0
 
     async def show_contacts(self):
@@ -301,85 +241,29 @@ class CypherChat:
         self.console.print(f"Public Key: {self.crypto.get_public_key_hex()}")
         self.console.print(f"Private Key: {self.crypto.private_key.private_bytes(serialization.Encoding.Raw, serialization.PrivateFormat.Raw, serialization.NoEncryption()).hex()}")
 
-    async def add_contact(self):
-        """Ajoute un nouveau contact"""
-        self.console.print("\n[bold]Ajouter un contact[/bold]")
-        self.console.print("1. Depuis la liste des pairs")
-        self.console.print("2. Avec une clé publique")
-        
-        choice = Prompt.ask("Choisissez une option", choices=["1", "2"])
-        
-        if choice == "1":
-            # Affiche la liste des pairs
-            try:
-                async with self.session.get(f"http://{self.current_peer}/peers") as response:
-                    if response.status == 200:
-                        data = await response.json()
-                        if not data["peers"]:
-                            self.console.print("Aucun pair disponible")
-                            return
-                            
-                        self.console.print("\n[bold]Pairs disponibles:[/bold]")
-                        for i, peer in enumerate(data["peers"], 1):
-                            self.console.print(f"{i}. {peer['key'][:8]}... ({peer['address']})")
-                        
-                        try:
-                            peer_choice = int(Prompt.ask("\nChoisissez un pair (numéro)"))
-                            if 1 <= peer_choice <= len(data["peers"]):
-                                peer = data["peers"][peer_choice - 1]
-                                self.contacts[peer["key"]] = "connecté"
-                                self.console.print(f"[green]✓[/green] Contact ajouté: {peer['key'][:8]}...")
-                            else:
-                                self.console.print("[red]Error:[/red] Choix invalide")
-                        except ValueError:
-                            self.console.print("[red]Error:[/red] Entrée invalide")
-                    else:
-                        self.console.print("[red]Error:[/red] Failed to get peers list")
-            except Exception as e:
-                self.console.print(f"[red]Error:[/red] {str(e)}")
-        
-        elif choice == "2":
-            # Ajout manuel avec une clé publique
-            key = Prompt.ask("\nEntrez la clé publique du contact")
-            if len(key) == 64:  # Vérifie que la clé a la bonne longueur
-                self.contacts[key] = "manuel"
-                self.console.print(f"[green]✓[/green] Contact ajouté: {key[:8]}...")
-            else:
-                self.console.print("[red]Error:[/red] Clé publique invalide")
-
     async def main_loop(self):
         """Boucle principale de l'application"""
-        self.username = Prompt.ask("\nEnter your username")
         self.display_welcome()
 
         try:
             while True:
-                # Vérifie les nouveaux messages
-                await self.check_messages()
-                
                 self.display_menu()
-                choice = Prompt.ask("\n> ", choices=["1", "2", "3", "4", "5", "6", "7", "8", "9"])
+                choice = Prompt.ask("\n> ", choices=["1", "2", "3", "4", "5", "6"])
 
                 if choice == "1":
                     await self.connect_to_network()
                 elif choice == "2":
-                    await self.private_chat()
+                    await self.send_message()
                 elif choice == "3":
-                    await self.general_chat()
+                    await self.show_messages()
                 elif choice == "4":
-                    await self.show_inbox()
-                elif choice == "5":
                     await self.show_contacts()
-                elif choice == "6":
+                elif choice == "5":
                     await self.show_keys()
-                elif choice == "7":
-                    await self.list_peers()
-                elif choice == "8":
-                    await self.add_contact()
-                elif choice == "9":
+                elif choice == "6":
                     if self.session:
                         await self.session.close()
-                    self.console.print("\n[bold red]Goodbye! 👋[/bold red]")
+                    self.console.print("\n[bold red]Au revoir! 👋[/bold red]")
                     sys.exit(0)
         finally:
             if self.session:
