@@ -46,6 +46,9 @@ class CypherChat:
         """Gère la connexion au réseau"""
         peer = Prompt.ask("\nEnter peer address [ip:port]")
         try:
+            if self.session:
+                await self.session.close()
+            
             self.session = aiohttp.ClientSession()
             async with self.session.post(f"http://{peer}/peer", 
                 json={"address": self.crypto.get_public_key_hex()}) as response:
@@ -56,12 +59,17 @@ class CypherChat:
                     self.console.print("[green][+][/green] Network sync complete")
                 else:
                     self.console.print("[red]Error:[/red] Failed to connect to peer")
+                    await self.session.close()
+                    self.session = None
         except Exception as e:
             self.console.print(f"[red]Error:[/red] {str(e)}")
+            if self.session:
+                await self.session.close()
+                self.session = None
 
     async def send_message(self):
         """Gère l'envoi de messages"""
-        if not self.connected:
+        if not self.connected or not self.session:
             self.console.print("[red]Error:[/red] Not connected to network")
             return
 
@@ -120,25 +128,29 @@ class CypherChat:
         self.username = Prompt.ask("\nEnter your username")
         self.display_welcome()
 
-        while True:
-            self.display_menu()
-            choice = Prompt.ask("\n> ", choices=["1", "2", "3", "4", "5", "6"])
+        try:
+            while True:
+                self.display_menu()
+                choice = Prompt.ask("\n> ", choices=["1", "2", "3", "4", "5", "6"])
 
-            if choice == "1":
-                await self.connect_to_network()
-            elif choice == "2":
-                await self.send_message()
-            elif choice == "3":
-                await self.show_inbox()
-            elif choice == "4":
-                await self.show_contacts()
-            elif choice == "5":
-                await self.show_keys()
-            elif choice == "6":
-                if self.session:
-                    await self.session.close()
-                self.console.print("\n[bold red]Goodbye! 👋[/bold red]")
-                sys.exit(0)
+                if choice == "1":
+                    await self.connect_to_network()
+                elif choice == "2":
+                    await self.send_message()
+                elif choice == "3":
+                    await self.show_inbox()
+                elif choice == "4":
+                    await self.show_contacts()
+                elif choice == "5":
+                    await self.show_keys()
+                elif choice == "6":
+                    if self.session:
+                        await self.session.close()
+                    self.console.print("\n[bold red]Goodbye! 👋[/bold red]")
+                    sys.exit(0)
+        finally:
+            if self.session:
+                await self.session.close()
 
 if __name__ == "__main__":
     chat = CypherChat()

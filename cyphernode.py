@@ -39,7 +39,7 @@ class CypherNode:
             # Stocke le message pour le destinataire
             if recipient_key not in self.message_queue:
                 self.message_queue[recipient_key] = []
-            
+
             self.message_queue[recipient_key].append({
                 "sender_key": sender_key,
                 "encrypted_message": encrypted_message,
@@ -108,7 +108,7 @@ class CypherNode:
         
         runner = web.AppRunner(self.app)
         await runner.setup()
-        site = web.TCPSite(runner, 'localhost', self.port)
+        site = web.TCPSite(runner, '0.0.0.0', self.port)  # Écoute sur toutes les interfaces
         await site.start()
         
         # Garde le serveur en vie
