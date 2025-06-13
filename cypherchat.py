@@ -40,32 +40,69 @@ class CypherChat:
         self.console.print("  3. 📥 Inbox")
         self.console.print("  4. 👥 Contacts")
         self.console.print("  5. 🔐 My keys")
-        self.console.print("  6. 🚪 Quit")
+        self.console.print("  6. 👀 Liste des pairs")
+        self.console.print("  7. 🚪 Quit")
 
     async def connect_to_network(self):
         """Gère la connexion au réseau"""
         peer = Prompt.ask("\nEnter peer address [ip:port]")
+        
+        # Vérifie si le port est spécifié
+        if ':' not in peer:
+            peer = f"{peer}:9001"  # Port par défaut
+            
         try:
             if self.session:
                 await self.session.close()
             
             self.session = aiohttp.ClientSession()
+            self.console.print(f"[yellow]Tentative de connexion à {peer}...[/yellow]")
+            
             async with self.session.post(f"http://{peer}/peer", 
-                json={"address": self.crypto.get_public_key_hex()}) as response:
+                json={"address": self.crypto.get_public_key_hex()},
+                timeout=10) as response:  # Ajout d'un timeout
                 if response.status == 200:
                     self.current_peer = peer
                     self.connected = True
                     self.console.print(f"[green][+][/green] Connected to peer @{peer}")
                     self.console.print("[green][+][/green] Network sync complete")
                 else:
-                    self.console.print("[red]Error:[/red] Failed to connect to peer")
+                    self.console.print(f"[red]Error:[/red] Failed to connect to peer (status: {response.status})")
                     await self.session.close()
                     self.session = None
+        except asyncio.TimeoutError:
+            self.console.print("[red]Error:[/red] Connection timeout")
+            if self.session:
+                await self.session.close()
+                self.session = None
         except Exception as e:
             self.console.print(f"[red]Error:[/red] {str(e)}")
             if self.session:
                 await self.session.close()
                 self.session = None
+
+    async def list_peers(self):
+        """Affiche la liste des pairs connectés"""
+        if not self.connected or not self.session:
+            self.console.print("[red]Error:[/red] Not connected to network")
+            return
+
+        try:
+            async with self.session.get(f"http://{self.current_peer}/peers") as response:
+                if response.status == 200:
+                    data = await response.json()
+                    self.console.print("\n[bold]Pairs connectés:[/bold]")
+                    if not data["peers"]:
+                        self.console.print("Aucun pair connecté")
+                    else:
+                        for peer in data["peers"]:
+                            self.console.print(f"- {peer['key'][:8]}... ({peer['address']})")
+                            # Ajoute automatiquement aux contacts
+                            self.contacts[peer['key']] = "connecté"
+                else:
+                    self.console.print("[red]Error:[/red] Failed to get peers list")
+        except Exception as e:
+            self.console.print(f"[red]Error:[/red] {str(e)}")
 
     async def send_message(self):
         """Gère l'envoi de messages"""
@@ -73,12 +110,28 @@ class CypherChat:
             self.console.print("[red]Error:[/red] Not connected to network")
             return
 
+        # Affiche d'abord la liste des contacts
+        if self.contacts:
+            self.console.print("\n[bold]Contacts disponibles:[/bold]")
+            for key, status in self.contacts.items():
+                self.console.print(f"- {key[:8]}... ({status})")
+
         recipient = Prompt.ask("\nTo (username or key)")
         message = Prompt.ask("Message")
 
         try:
+            # Vérifie si le destinataire est dans les contacts
+            if recipient in self.contacts:
+                recipient_key = recipient
+            else:
+                # Si c'est un nom d'utilisateur, cherche la clé correspondante
+                recipient_key = next((k for k, v in self.contacts.items() if v == recipient), None)
+                if not recipient_key:
+                    self.console.print("[red]Error:[/red] Destinataire non trouvé")
+                    return
+
             # Crée le paquet de message chiffré
-            message_packet = self.crypto.create_message_packet(recipient, message)
+            message_packet = self.crypto.create_message_packet(recipient_key, message)
             
             # Envoie le message au relai
             async with self.session.post(f"http://{self.current_peer}/relay", 
@@ -131,7 +184,7 @@ class CypherChat:
         try:
             while True:
                 self.display_menu()
-                choice = Prompt.ask("\n> ", choices=["1", "2", "3", "4", "5", "6"])
+                choice = Prompt.ask("\n> ", choices=["1", "2", "3", "4", "5", "6", "7"])
 
                 if choice == "1":
                     await self.connect_to_network()
@@ -144,6 +197,8 @@ class CypherChat:
                 elif choice == "5":
                     await self.show_keys()
                 elif choice == "6":
+                    await self.list_peers()
+                elif choice == "7":
                     if self.session:
                         await self.session.close()
                     self.console.print("\n[bold red]Goodbye! 👋[/bold red]")

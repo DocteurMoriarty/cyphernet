@@ -23,6 +23,7 @@ class CypherNode:
         self.app.router.add_post('/peer', self.handle_peer)
         self.app.router.add_get('/status', self.handle_status)
         self.app.router.add_get('/messages', self.handle_get_messages)
+        self.app.router.add_get('/peers', self.handle_list_peers)
 
     async def handle_relay(self, request):
         """Gère le relai des messages chiffrés"""
@@ -86,6 +87,17 @@ class CypherNode:
         except Exception as e:
             self.console.print(f"[red]Error:[/red] {str(e)}")
             return web.json_response({"error": str(e)}, status=400)
+
+    async def handle_list_peers(self, request):
+        """Retourne la liste des pairs connectés"""
+        return web.json_response({
+            "peers": [
+                {
+                    "key": key,
+                    "address": str(addr)
+                } for key, addr in self.peers.items()
+            ]
+        })
 
     async def handle_status(self, request):
         """Retourne le statut du nœud"""
