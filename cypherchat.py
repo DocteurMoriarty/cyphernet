@@ -8,6 +8,7 @@ from rich.console import Console
 from rich.prompt import Prompt
 from rich.panel import Panel
 from rich import print as rprint
+from cryptography.hazmat.primitives import serialization
 from crypto import CypherCrypto
 
 class CypherChat:
@@ -20,6 +21,7 @@ class CypherChat:
         self.messages = []
         self.current_peer = None
         self.session = None
+        self.unread_count = 0
 
     def display_welcome(self):
         """Affiche l'écran d'accueil"""
@@ -37,7 +39,7 @@ class CypherChat:
         self.console.print("\n[bold]Available commands:[/bold]")
         self.console.print("  1. 📡 Connect to network")
         self.console.print("  2. 💬 Send a message")
-        self.console.print("  3. 📥 Inbox")
+        self.console.print(f"  3. 📥 Inbox {f'({self.unread_count})' if self.unread_count > 0 else ''}")
         self.console.print("  4. 👥 Contacts")
         self.console.print("  5. 🔐 My keys")
         self.console.print("  6. 👀 Liste des pairs")
@@ -104,6 +106,57 @@ class CypherChat:
         except Exception as e:
             self.console.print(f"[red]Error:[/red] {str(e)}")
 
+    async def check_messages(self):
+        """Vérifie les nouveaux messages"""
+        if not self.connected or not self.session:
+            return
+
+        try:
+            async with self.session.get(f"http://{self.current_peer}/messages?key={self.crypto.get_public_key_hex()}") as response:
+                if response.status == 200:
+                    data = await response.json()
+                    new_messages = data.get("messages", [])
+                    if new_messages:
+                        self.messages.extend(new_messages)
+                        self.unread_count += len(new_messages)
+        except Exception as e:
+            self.console.print(f"[red]Error checking messages:[/red] {str(e)}")
+
+    async def show_inbox(self):
+        """Affiche la boîte de réception"""
+        if not self.messages:
+            self.console.print("\n[bold]Inbox:[/bold]")
+            self.console.print("Aucun message")
+            return
+
+        self.console.print(f"\n[bold]Inbox ({len(self.messages)} messages):[/bold]")
+        for msg in self.messages:
+            try:
+                decrypted = self.crypto.decrypt_message(
+                    msg["encrypted_message"], 
+                    msg["sender_key"]
+                )
+                self.console.print(f"🔐 From: {msg['sender_key'][:8]}...")
+                self.console.print(f"🕒 {msg['timestamp']}")
+                self.console.print(f'"{decrypted}"')
+                self.console.print("─" * 40)
+            except Exception as e:
+                self.console.print(f"[red]Error decrypting message:[/red] {str(e)}")
+        
+        self.unread_count = 0
+
+    async def show_contacts(self):
+        """Affiche la liste des contacts"""
+        self.console.print("\n[bold]Contacts:[/bold]")
+        for contact, status in self.contacts.items():
+            self.console.print(f"- @{contact} ({status})")
+
+    async def show_keys(self):
+        """Affiche les clés de l'utilisateur"""
+        self.console.print("\n[bold]My Keys:[/bold]")
+        self.console.print(f"Public Key: {self.crypto.get_public_key_hex()}")
+        self.console.print(f"Private Key: {self.crypto.private_key.private_bytes(serialization.Encoding.Raw, serialization.PrivateFormat.Raw, serialization.NoEncryption()).hex()}")
+
     async def send_message(self):
         """Gère l'envoi de messages"""
         if not self.connected or not self.session:
@@ -144,38 +197,6 @@ class CypherChat:
         except Exception as e:
             self.console.print(f"[red]Error:[/red] {str(e)}")
 
-    async def show_inbox(self):
-        """Affiche la boîte de réception"""
-        if not self.messages:
-            self.console.print("\n[bold]Inbox:[/bold]")
-            self.console.print("Aucun message")
-            return
-
-        self.console.print("\n[bold]Inbox:[/bold]")
-        for msg in self.messages:
-            try:
-                decrypted = self.crypto.decrypt_message(
-                    msg["encrypted_message"], 
-                    msg["sender_key"]
-                )
-                self.console.print(f"🔐 From: {msg['sender_key'][:8]}...")
-                self.console.print(f"🕒 {msg['timestamp']}")
-                self.console.print(f'"{decrypted}"')
-            except Exception as e:
-                self.console.print(f"[red]Error decrypting message:[/red] {str(e)}")
-
-    async def show_contacts(self):
-        """Affiche la liste des contacts"""
-        self.console.print("\n[bold]Contacts:[/bold]")
-        for contact, status in self.contacts.items():
-            self.console.print(f"- @{contact} ({status})")
-
-    async def show_keys(self):
-        """Affiche les clés de l'utilisateur"""
-        self.console.print("\n[bold]My Keys:[/bold]")
-        self.console.print(f"Public Key: {self.crypto.get_public_key_hex()}")
-        self.console.print(f"Private Key: {self.crypto.private_key.private_bytes(serialization.Encoding.Raw, serialization.PrivateFormat.Raw, serialization.NoEncryption()).hex()}")
-
     async def main_loop(self):
         """Boucle principale de l'application"""
         self.username = Prompt.ask("\nEnter your username")
@@ -183,6 +204,9 @@ class CypherChat:
 
         try:
             while True:
+                # Vérifie les nouveaux messages
+                await self.check_messages()
+                
                 self.display_menu()
                 choice = Prompt.ask("\n> ", choices=["1", "2", "3", "4", "5", "6", "7"])
 
