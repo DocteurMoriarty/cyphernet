@@ -1,135 +1,139 @@
 #!/usr/bin/env python3
 import asyncio
+from aiohttp import web
+import json
 import argparse
 from rich.console import Console
 from rich.panel import Panel
-import aiohttp
-from aiohttp import web
-import json
-import time
+from datetime import datetime
 
 class CypherNode:
-    def __init__(self, port):
-        self.console = Console()
+    def __init__(self, port=9001):
         self.port = port
-        self.peers = {}  # {peer_key: peer_address}
-        self.message_queue = {}  # {recipient_key: [messages]}
-        self.app = web.Application()
-        self.setup_routes()
+        self.peers = {}  # {public_key: {"address": address, "username": username}}
+        self.messages = {}  # {recipient_key: [messages]}
+        self.console = Console()
 
-    def setup_routes(self):
-        """Configure les routes de l'API"""
-        self.app.router.add_post('/relay', self.handle_relay)
-        self.app.router.add_post('/peer', self.handle_peer)
-        self.app.router.add_get('/status', self.handle_status)
-        self.app.router.add_get('/messages', self.handle_get_messages)
-        self.app.router.add_get('/peers', self.handle_list_peers)
-
-    async def handle_relay(self, request):
-        """Gère le relai des messages chiffrés"""
+    async def handle_connect(self, request):
+        """Gère la connexion d'un nouveau pair"""
         try:
             data = await request.json()
-            sender_key = data.get('sender_key')
-            recipient_key = data.get('recipient_key')
-            encrypted_message = data.get('encrypted_message')
-            timestamp = data.get('timestamp')
+            public_key = data.get("public_key")
+            username = data.get("username")
 
-            if not all([sender_key, recipient_key, encrypted_message, timestamp]):
-                return web.json_response({"error": "missing fields"}, status=400)
+            if not public_key or not username:
+                return web.json_response({"error": "Missing public_key or username"}, status=400)
 
-            # Stocke le message pour le destinataire
-            if recipient_key not in self.message_queue:
-                self.message_queue[recipient_key] = []
+            # Ajoute ou met à jour le pair
+            self.peers[public_key] = {
+                "address": request.remote,
+                "username": username,
+                "last_seen": datetime.now().isoformat()
+            }
 
-            self.message_queue[recipient_key].append({
-                "sender_key": sender_key,
-                "encrypted_message": encrypted_message,
-                "timestamp": timestamp
+            # Retourne la liste des pairs connectés
+            return web.json_response({
+                "status": "connected",
+                "peers": [
+                    {
+                        "key": key,
+                        "address": info["address"],
+                        "username": info["username"]
+                    }
+                    for key, info in self.peers.items()
+                ]
+            })
+        except Exception as e:
+            self.console.print(f"[red]Error in handle_connect:[/red] {str(e)}")
+            return web.json_response({"error": str(e)}, status=500)
+
+    async def handle_message(self, request):
+        """Gère la réception d'un message"""
+        try:
+            data = await request.json()
+            to_key = data.get("to")
+            from_key = data.get("from")
+            message = data.get("message")
+
+            if not all([to_key, from_key, message]):
+                return web.json_response({"error": "Missing required fields"}, status=400)
+
+            # Stocke le message
+            if to_key not in self.messages:
+                self.messages[to_key] = []
+            
+            self.messages[to_key].append({
+                "from": from_key,
+                "message": message,
+                "timestamp": datetime.now().isoformat()
             })
 
-            self.console.print(f"[green]✓[/green] Message relayé de {sender_key[:8]}... vers {recipient_key[:8]}...")
-            return web.json_response({"status": "relayed"})
-
+            return web.json_response({"status": "message received"})
         except Exception as e:
-            self.console.print(f"[red]Error:[/red] {str(e)}")
-            return web.json_response({"error": str(e)}, status=400)
-
-    async def handle_peer(self, request):
-        """Gère l'ajout de nouveaux pairs"""
-        try:
-            data = await request.json()
-            peer_key = data.get('address')
-            if not peer_key:
-                return web.json_response({"error": "invalid peer"}, status=400)
-
-            # Stocke l'adresse du pair
-            self.peers[peer_key] = request.remote
-            self.console.print(f"[green]+[/green] Nouveau pair connecté: {peer_key[:8]}...")
-            return web.json_response({"status": "peer added"})
-
-        except Exception as e:
-            self.console.print(f"[red]Error:[/red] {str(e)}")
-            return web.json_response({"error": str(e)}, status=400)
+            self.console.print(f"[red]Error in handle_message:[/red] {str(e)}")
+            return web.json_response({"error": str(e)}, status=500)
 
     async def handle_get_messages(self, request):
-        """Gère la récupération des messages pour un pair"""
+        """Gère la récupération des messages"""
         try:
-            peer_key = request.query.get('key')
-            if not peer_key:
-                return web.json_response({"error": "missing key"}, status=400)
+            key = request.query.get("key")
+            if not key:
+                return web.json_response({"error": "Missing key parameter"}, status=400)
 
-            # Récupère les messages en attente
-            messages = self.message_queue.get(peer_key, [])
-            self.message_queue[peer_key] = []  # Vide la file d'attente
+            messages = self.messages.get(key, [])
+            # Vide la boîte de réception après lecture
+            self.messages[key] = []
 
             return web.json_response({"messages": messages})
-
         except Exception as e:
-            self.console.print(f"[red]Error:[/red] {str(e)}")
-            return web.json_response({"error": str(e)}, status=400)
+            self.console.print(f"[red]Error in handle_get_messages:[/red] {str(e)}")
+            return web.json_response({"error": str(e)}, status=500)
 
     async def handle_list_peers(self, request):
-        """Retourne la liste des pairs connectés"""
-        return web.json_response({
-            "peers": [
-                {
-                    "key": key,
-                    "address": str(addr)
-                } for key, addr in self.peers.items()
-            ]
-        })
-
-    async def handle_status(self, request):
-        """Retourne le statut du nœud"""
-        return web.json_response({
-            "status": "running",
-            "peers": len(self.peers),
-            "port": self.port,
-            "message_queue": sum(len(messages) for messages in self.message_queue.values())
-        })
+        """Gère la liste des pairs connectés"""
+        try:
+            return web.json_response({
+                "peers": [
+                    {
+                        "key": key,
+                        "address": info["address"],
+                        "username": info["username"]
+                    }
+                    for key, info in self.peers.items()
+                ]
+            })
+        except Exception as e:
+            self.console.print(f"[red]Error in handle_list_peers:[/red] {str(e)}")
+            return web.json_response({"error": str(e)}, status=500)
 
     async def start(self):
         """Démarre le serveur"""
-        self.console.print(Panel.fit(
-            f"[bold green]CypherNode v1.0[/bold green]\n"
-            f"[green][+][/green] Listening on port {self.port}\n"
-            "[green][+][/green] Ready to relay encrypted messages",
-            title="CypherNode",
-            border_style="green"
-        ))
-        
-        runner = web.AppRunner(self.app)
+        app = web.Application()
+        app.router.add_post("/connect", self.handle_connect)
+        app.router.add_post("/message", self.handle_message)
+        app.router.add_get("/messages", self.handle_get_messages)
+        app.router.add_get("/peers", self.handle_list_peers)
+
+        runner = web.AppRunner(app)
         await runner.setup()
-        site = web.TCPSite(runner, '0.0.0.0', self.port)  # Écoute sur toutes les interfaces
+        site = web.TCPSite(runner, "0.0.0.0", self.port)
         await site.start()
-        
-        # Garde le serveur en vie
-        while True:
-            await asyncio.sleep(3600)
+
+        self.console.print(Panel(
+            f"CypherNode v1.0\n[+] Listening on port {self.port}\n[+] Ready to relay encrypted messages",
+            title="CypherNode",
+            border_style="blue"
+        ))
+
+        try:
+            while True:
+                await asyncio.sleep(3600)  # Keep the server running
+        except KeyboardInterrupt:
+            await runner.cleanup()
 
 def main():
-    parser = argparse.ArgumentParser(description='CypherNet P2P Node')
-    parser.add_argument('--port', type=int, default=9001, help='Port to listen on')
+    parser = argparse.ArgumentParser(description="CypherNode - Serveur P2P pour CypherNet")
+    parser.add_argument("--port", type=int, default=9001, help="Port d'écoute (défaut: 9001)")
     args = parser.parse_args()
 
     node = CypherNode(args.port)
