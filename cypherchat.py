@@ -106,25 +106,26 @@ class CypherChat:
             self.console.print(f"[red]Error saving contacts:[/red] {str(e)}")
 
     def display_welcome(self):
-        """Affiche l'écran d'accueil"""
-        self.console.clear()
-        self.console.print(Panel.fit(
-            "[bold green]Welcome to CypherNet 🕵️‍♂️💬[/bold green]\n"
-            "[green]✓[/green] Chiffrement activé (E2EE)\n"
-            f"[green]✓[/green] Identité : @{self.username} (clé: {self.crypto.get_public_key_hex()[:8]}...)",
+        """Affiche le message de bienvenue"""
+        self.console.print(Panel(
+            f"Welcome to CypherNet 🕵️‍♂️💬\n"
+            f"✓ Chiffrement activé (E2EE)\n"
+            f"✓ Identité : @{self.username or 'None'} (clé: {self.crypto.get_public_key_hex()[:8]}...)",
             title="CypherNet",
-            border_style="green"
+            border_style="blue"
         ))
 
     def display_menu(self):
         """Affiche le menu principal"""
         self.console.print("\n[bold]Menu:[/bold]")
-        self.console.print("1. Connecter")
-        self.console.print("2. Envoyer message")
-        self.console.print("3. Voir messages")
-        self.console.print("4. Voir contacts")
-        self.console.print("5. Voir clés")
-        self.console.print("6. Quitter")
+        self.console.print("1. 📡 Connecter")
+        self.console.print("2. 💬 Envoyer message")
+        self.console.print("3. 📥 Voir messages")
+        self.console.print("4. 👥 Contacts")
+        self.console.print("5. 🔐 Voir clés")
+        self.console.print("6. 👀 Liste des pairs")
+        self.console.print("7. ➕ Ajouter un contact")
+        self.console.print("8. �� Quitter")
 
     def create_chat_layout(self):
         """Crée la mise en page du chat"""
@@ -232,21 +233,93 @@ class CypherChat:
         except Exception as e:
             self.console.print(f"[red]Error:[/red] {str(e)}")
 
+    async def show_contacts(self):
+        """Affiche la liste des contacts"""
+        self.console.print("\n[bold]👥 Contacts:[/bold]")
+        if not self.contacts:
+            self.console.print("Aucun contact")
+            return
+            
+        for i, (key, info) in enumerate(self.contacts.items(), 1):
+            username = info.get("username", "Inconnu")
+            status = info.get("status", "connecté")
+            self.console.print(f"{i}. @{username} ({key[:8]}...) - {status}")
+
+    async def show_keys(self):
+        """Affiche les clés de l'utilisateur"""
+        self.console.print("\n[bold]🔐 My Keys:[/bold]")
+        self.console.print(f"Public Key: {self.crypto.get_public_key_hex()}")
+        self.console.print(f"Private Key: {self.crypto.private_key.private_bytes(serialization.Encoding.Raw, serialization.PrivateFormat.Raw, serialization.NoEncryption()).hex()}")
+
+    async def list_peers(self):
+        """Affiche la liste des pairs connectés"""
+        if not self.session:
+            self.console.print("[red]Error:[/red] Non connecté au réseau")
+            return
+
+        try:
+            async with self.session.get(f"http://{self.current_peer}/peers") as response:
+                if response.status == 200:
+                    data = await response.json()
+                    self.console.print("\n[bold]👀 Pairs connectés:[/bold]")
+                    if not data["peers"]:
+                        self.console.print("Aucun pair connecté")
+                    else:
+                        for i, peer in enumerate(data["peers"], 1):
+                            self.console.print(f"{i}. @{peer['username']} ({peer['key'][:8]}...)")
+                            # Ajoute automatiquement aux contacts
+                            if peer["key"] not in self.contacts:
+                                self.contacts[peer["key"]] = {
+                                    "username": peer["username"],
+                                    "status": "connecté"
+                                }
+                                self.save_contacts()
+                else:
+                    self.console.print("[red]Error:[/red] Failed to get peers list")
+        except Exception as e:
+            self.console.print(f"[red]Error:[/red] {str(e)}")
+
+    async def add_contact(self):
+        """Ajoute un nouveau contact"""
+        self.console.print("\n[bold]➕ Ajouter un contact[/bold]")
+        self.console.print("1. Depuis la liste des pairs")
+        self.console.print("2. Avec une clé publique")
+        
+        choice = Prompt.ask("Choisissez une option", choices=["1", "2"])
+        
+        if choice == "1":
+            await self.list_peers()
+        elif choice == "2":
+            key = Prompt.ask("\nEntrez la clé publique du contact")
+            username = Prompt.ask("Entrez le nom d'utilisateur du contact")
+            if len(key) == 64:
+                self.contacts[key] = {
+                    "username": username,
+                    "status": "manuel"
+                }
+                self.save_contacts()
+                self.console.print(f"[green]✓[/green] Contact ajouté: @{username} ({key[:8]}...)")
+            else:
+                self.console.print("[red]Error:[/red] Clé publique invalide")
+
     async def send_message(self):
         """Envoie un message à un contact"""
         if not self.contacts:
             self.console.print("Aucun contact disponible")
             return
 
-        self.console.print("\nContacts disponibles:")
-        for i, (key, status) in enumerate(self.contacts.items(), 1):
-            self.console.print(f"{i}. {key[:8]}... ({status})")
+        self.console.print("\n[bold]💬 Contacts disponibles:[/bold]")
+        for i, (key, info) in enumerate(self.contacts.items(), 1):
+            username = info.get("username", "Inconnu")
+            status = info.get("status", "connecté")
+            self.console.print(f"{i}. @{username} ({key[:8]}...) - {status}")
 
         try:
             choice = int(Prompt.ask("\nChoisissez un contact (numéro)"))
             if 1 <= choice <= len(self.contacts):
                 recipient_key = list(self.contacts.keys())[choice - 1]
-                message = Prompt.ask("\nEntrez votre message")
+                recipient_info = self.contacts[recipient_key]
+                message = Prompt.ask(f"\nMessage pour @{recipient_info['username']}")
                 
                 encrypted = self.crypto.encrypt_message(message, recipient_key)
                 async with self.session.post(
@@ -254,7 +327,8 @@ class CypherChat:
                     json={
                         "to": recipient_key,
                         "from": self.crypto.get_public_key_hex(),
-                        "message": encrypted
+                        "message": encrypted,
+                        "username": self.username
                     }
                 ) as response:
                     if response.status == 200:
@@ -271,33 +345,19 @@ class CypherChat:
     async def show_messages(self):
         """Affiche les messages reçus"""
         if not self.messages:
+            self.console.print("\n[bold]📥 Messages:[/bold]")
             self.console.print("Aucun message")
             return
 
-        self.console.print("\nMessages:")
+        self.console.print("\n[bold]📥 Messages:[/bold]")
         for msg in self.messages:
-            self.console.print(f"\nDe: {msg['from'][:8]}...")
-            self.console.print(f"Message: {msg['decrypted']}")
-            self.console.print(f"Date: {msg['timestamp']}")
-            self.console.print("-" * 40)
+            sender_username = msg.get("username", "Inconnu")
+            self.console.print(f"\n👤 De: @{sender_username} ({msg['from'][:8]}...)")
+            self.console.print(f"💬 Message: {msg['decrypted']}")
+            self.console.print(f"🕒 Date: {msg['timestamp']}")
+            self.console.print("─" * 40)
 
         self.unread_count = 0
-
-    async def show_contacts(self):
-        """Affiche la liste des contacts"""
-        self.console.print("\n[bold]Contacts:[/bold]")
-        if not self.contacts:
-            self.console.print("Aucun contact")
-            return
-            
-        for i, (key, status) in enumerate(self.contacts.items(), 1):
-            self.console.print(f"{i}. {key[:8]}... ({status})")
-
-    async def show_keys(self):
-        """Affiche les clés de l'utilisateur"""
-        self.console.print("\n[bold]My Keys:[/bold]")
-        self.console.print(f"Public Key: {self.crypto.get_public_key_hex()}")
-        self.console.print(f"Private Key: {self.crypto.private_key.private_bytes(serialization.Encoding.Raw, serialization.PrivateFormat.Raw, serialization.NoEncryption()).hex()}")
 
     async def main_loop(self):
         """Boucle principale de l'application"""
@@ -306,7 +366,7 @@ class CypherChat:
         try:
             while True:
                 self.display_menu()
-                choice = Prompt.ask("\n> ", choices=["1", "2", "3", "4", "5", "6"])
+                choice = Prompt.ask("\n> ", choices=["1", "2", "3", "4", "5", "6", "7", "8"])
 
                 if choice == "1":
                     await self.connect_to_network()
@@ -319,6 +379,10 @@ class CypherChat:
                 elif choice == "5":
                     await self.show_keys()
                 elif choice == "6":
+                    await self.list_peers()
+                elif choice == "7":
+                    await self.add_contact()
+                elif choice == "8":
                     if self.session:
                         await self.session.close()
                     self.console.print("\n[bold red]Au revoir! 👋[/bold red]")
