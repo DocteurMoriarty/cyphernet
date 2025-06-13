@@ -14,6 +14,9 @@ from rich.table import Table
 from cryptography.hazmat.primitives import serialization
 from crypto import CypherCrypto
 import time
+from cryptography.hazmat.primitives import x25519
+from cryptography.fernet import Fernet
+import base64
 
 class CypherChat:
     def __init__(self):
@@ -128,6 +131,7 @@ class CypherChat:
                         bytes.fromhex(user_info.get("private_key")),
                         password=None
                     )
+                    self.crypto.public_key = self.crypto.private_key.public_key()
                     self.console.print(f"[green]✓[/green] Informations utilisateur chargées")
             except Exception as e:
                 self.console.print(f"[red]Error loading user info:[/red] {str(e)}")
@@ -143,7 +147,7 @@ class CypherChat:
                 f"http://{peer_address}/connect",
                 json={
                     "username": self.username,
-                    "public_key": self.crypto.public_key.hex()
+                    "public_key": self.crypto.get_public_key_hex()
                 }
             ) as response:
                 if response.status == 200:
