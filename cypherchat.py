@@ -208,11 +208,20 @@ class CypherChat:
                     if data["type"] == "new_message":
                         # Nouveau message reçu
                         message = data["message"]
-                        self.messages.append(message)
-                        self.unread_count += 1
-                        self.console.print(f"\n[bold green]Nouveau message de @{message['username']}[/bold green]")
-                        self.console.print(f"💬 {message['message']}")
-                        self.console.print("─" * 40)
+                        try:
+                            # Déchiffre le message
+                            decrypted = self.crypto.decrypt_message(message["message"])
+                            self.messages.append({
+                                "from": message["username"],
+                                "message": decrypted,
+                                "timestamp": message["timestamp"]
+                            })
+                            self.unread_count += 1
+                            self.console.print(f"\n[bold green]Nouveau message de @{message['username']}[/bold green]")
+                            self.console.print(f"💬 {decrypted}")
+                            self.console.print("─" * 40)
+                        except Exception as e:
+                            self.console.print(f"[red]Error decrypting message:[/red] {str(e)}")
                     
                     elif data["type"] == "peers_update":
                         # Mise à jour de la liste des pairs
@@ -440,19 +449,38 @@ class CypherChat:
 
     async def show_messages(self):
         """Affiche les messages reçus"""
-        if not self.messages:
-            self.console.print("\n📥 Messages:")
-            self.console.print("Aucun message")
-            return
+        try:
+            if not self.current_peer:
+                self.console.print("[red]Error:[/red] Non connecté au réseau")
+                return
 
-        self.console.print("\n📥 Messages:")
-        for msg in self.messages:
-            self.console.print(f"\n[bold]De:[/bold] @{msg['username']}")
-            self.console.print(f"[bold]Message:[/bold] {msg['message']}")
-            self.console.print(f"[bold]Date:[/bold] {msg['timestamp']}")
-            self.console.print("─" * 40)
+            # Récupère les messages du serveur
+            async with self.session.get(
+                f"http://{self.current_peer}/messages",
+                json={"public_key": self.crypto.get_public_key_hex()}
+            ) as response:
+                if response.status == 200:
+                    messages = await response.json()
+                    if not messages:
+                        self.console.print("\n📥 Messages:")
+                        self.console.print("Aucun message")
+                        return
 
-        self.unread_count = 0
+                    self.console.print("\n📥 Messages:")
+                    for msg in messages:
+                        try:
+                            # Déchiffre le message
+                            decrypted = self.crypto.decrypt_message(msg["message"])
+                            self.console.print(f"\n[bold]De:[/bold] @{msg['from']}")
+                            self.console.print(f"[bold]Message:[/bold] {decrypted}")
+                            self.console.print(f"[bold]Date:[/bold] {msg['timestamp']}")
+                            self.console.print("─" * 40)
+                        except Exception as e:
+                            self.console.print(f"[red]Error decrypting message:[/red] {str(e)}")
+                else:
+                    self.console.print("[red]Error:[/red] Impossible de récupérer les messages")
+        except Exception as e:
+            self.console.print(f"[red]Error:[/red] {str(e)}")
 
     async def main_loop(self):
         """Boucle principale de l'application"""
