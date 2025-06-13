@@ -74,18 +74,15 @@ class Crypto:
 
 class CypherChat:
     def __init__(self):
-        self.console = Console()
         self.username = None
         self.crypto = Crypto()
-        self.connected = False
-        self.contacts = {}
+        self.contacts = {}  # {key: {"username": username, "status": status}}
         self.messages = []
         self.general_messages = []
-        self.current_peer = None
-        self.session = None
         self.unread_count = 0
-        self.current_chat = None
-        self.layout = Layout()
+        self.session = None
+        self.current_peer = None
+        self.console = Console()
         self.load_contacts()
 
     def load_contacts(self):
@@ -93,7 +90,16 @@ class CypherChat:
         try:
             if os.path.exists("contacts.json"):
                 with open("contacts.json", "r") as f:
-                    self.contacts = json.load(f)
+                    contacts_data = json.load(f)
+                    # Convertit les anciens contacts en nouveau format si nécessaire
+                    for key, value in contacts_data.items():
+                        if isinstance(value, str):
+                            self.contacts[key] = {
+                                "username": f"Contact_{key[:8]}",
+                                "status": value
+                            }
+                        else:
+                            self.contacts[key] = value
         except Exception as e:
             self.console.print(f"[red]Error loading contacts:[/red] {str(e)}")
 
@@ -208,7 +214,6 @@ class CypherChat:
                 if response.status == 200:
                     data = await response.json()
                     self.current_peer = peer_address
-                    self.connected = True
                     self.console.print(f"[green]✓[/green] Connecté au réseau")
                     
                     # Sauvegarde les informations utilisateur
@@ -226,7 +231,10 @@ class CypherChat:
                     # Ajoute les pairs connectés aux contacts
                     for peer in data.get("peers", []):
                         if peer["key"] not in self.contacts:
-                            self.contacts[peer["key"]] = "connecté"
+                            self.contacts[peer["key"]] = {
+                                "username": peer["username"],
+                                "status": "connecté"
+                            }
                     self.save_contacts()
                 else:
                     self.console.print("[red]Error:[/red] Failed to connect to peer")
