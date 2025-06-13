@@ -16,6 +16,7 @@ from cryptography.hazmat.primitives.asymmetric import rsa, padding
 from cryptography.fernet import Fernet
 import time
 import base64
+from datetime import datetime
 
 class Crypto:
     def __init__(self):
@@ -198,9 +199,11 @@ class CypherChat:
     async def receive_websocket_messages(self):
         """Reçoit les messages WebSocket"""
         try:
+            self.console.print("[yellow]WebSocket:[/yellow] En attente de messages...")
             async for msg in self.ws:
                 if msg.type == aiohttp.WSMsgType.TEXT:
                     data = json.loads(msg.data)
+                    self.console.print(f"[yellow]WebSocket:[/yellow] Message reçu: {data['type']}")
                     
                     if data["type"] == "new_message":
                         # Nouveau message reçu
@@ -213,6 +216,7 @@ class CypherChat:
                     
                     elif data["type"] == "peers_update":
                         # Mise à jour de la liste des pairs
+                        self.console.print("[yellow]WebSocket:[/yellow] Mise à jour des pairs")
                         for peer in data["peers"]:
                             if peer["key"] not in self.contacts:
                                 self.contacts[peer["key"]] = {
@@ -220,6 +224,7 @@ class CypherChat:
                                     "status": peer["status"]
                                 }
                                 self.save_contacts()
+                                self.console.print(f"[green]✓[/green] Nouveau pair ajouté: @{peer['username']}")
                     
                     elif data["type"] == "peer_status":
                         # Mise à jour du statut d'un pair
@@ -229,15 +234,18 @@ class CypherChat:
                             self.console.print(f"\n[bold]Statut de @{self.contacts[data['key']]['username']} : {data['status']}[/bold]")
                 
                 elif msg.type == aiohttp.WSMsgType.CLOSED:
+                    self.console.print("[red]WebSocket:[/red] Connexion fermée")
                     break
                 elif msg.type == aiohttp.WSMsgType.ERROR:
+                    self.console.print(f"[red]WebSocket:[/red] Erreur: {msg.data}")
                     break
         except Exception as e:
-            self.console.print(f"[red]Error receiving websocket messages:[/red] {str(e)}")
+            self.console.print(f"[red]WebSocket:[/red] Erreur de réception: {str(e)}")
         finally:
             if self.ws:
                 await self.ws.close()
                 self.ws = None
+                self.console.print("[yellow]WebSocket:[/yellow] Déconnecté")
 
     async def connect_to_network(self):
         """Connecte au réseau P2P"""
@@ -378,59 +386,54 @@ class CypherChat:
             else:
                 self.console.print("[red]Error:[/red] Clé publique invalide")
 
-    async def send_message(self):
-        """Envoie un message à un contact"""
-        if not self.contacts:
-            self.console.print("Aucun contact disponible")
-            return
-
-        self.console.print("\n[bold]💬 Contacts disponibles:[/bold]")
-        for i, (key, info) in enumerate(self.contacts.items(), 1):
-            username = info.get("username", "Inconnu")
-            status = info.get("status", "connecté")
-            self.console.print(f"{i}. @{username} ({key[:8]}...) - {status}")
-
+    async def send_message(self, recipient_key, message):
+        """Envoie un message chiffré"""
         try:
-            choice = int(Prompt.ask("\nChoisissez un contact (numéro)"))
-            if 1 <= choice <= len(self.contacts):
-                recipient_key = list(self.contacts.keys())[choice - 1]
-                recipient_info = self.contacts[recipient_key]
-                message = Prompt.ask(f"\nMessage pour @{recipient_info['username']}")
-                
-                encrypted = self.crypto.encrypt_message(message, recipient_key)
-                async with self.session.post(
-                    f"http://{self.current_peer}/message",
-                    json={
-                        "to": recipient_key,
-                        "from": self.crypto.get_public_key_hex(),
-                        "message": encrypted,
-                        "username": self.username
-                    }
-                ) as response:
-                    if response.status == 200:
-                        self.console.print("[green]✓[/green] Message envoyé")
-                    else:
-                        self.console.print("[red]Error:[/red] Failed to send message")
-            else:
-                self.console.print("[red]Error:[/red] Choix invalide")
-        except ValueError:
-            self.console.print("[red]Error:[/red] Entrée invalide")
+            if not self.current_peer:
+                self.console.print("[red]Error:[/red] Non connecté au réseau")
+                return
+
+            # Chiffre le message
+            encrypted_message = self.crypto.encrypt_message(message, recipient_key)
+            
+            # Envoie le message
+            async with self.session.post(
+                f"http://{self.current_peer}/message",
+                json={
+                    "recipient": recipient_key,
+                    "message": encrypted_message,
+                    "username": self.username
+                }
+            ) as response:
+                if response.status == 200:
+                    self.console.print("[green]✓[/green] Message envoyé")
+                    # Envoie aussi via WebSocket pour la mise à jour en temps réel
+                    if self.ws:
+                        await self.ws.send_json({
+                            "type": "new_message",
+                            "message": {
+                                "username": self.username,
+                                "message": message,
+                                "timestamp": datetime.now().isoformat()
+                            }
+                        })
+                else:
+                    self.console.print("[red]Error:[/red] Échec de l'envoi du message")
         except Exception as e:
             self.console.print(f"[red]Error:[/red] {str(e)}")
 
     async def show_messages(self):
         """Affiche les messages reçus"""
         if not self.messages:
-            self.console.print("\n[bold]📥 Messages:[/bold]")
+            self.console.print("\n📥 Messages:")
             self.console.print("Aucun message")
             return
 
-        self.console.print("\n[bold]📥 Messages:[/bold]")
+        self.console.print("\n📥 Messages:")
         for msg in self.messages:
-            sender_username = msg.get("username", "Inconnu")
-            self.console.print(f"\n👤 De: @{sender_username} ({msg['from'][:8]}...)")
-            self.console.print(f"💬 Message: {msg['decrypted']}")
-            self.console.print(f"🕒 Date: {msg['timestamp']}")
+            self.console.print(f"\n[bold]De:[/bold] @{msg['username']}")
+            self.console.print(f"[bold]Message:[/bold] {msg['message']}")
+            self.console.print(f"[bold]Date:[/bold] {msg['timestamp']}")
             self.console.print("─" * 40)
 
         self.unread_count = 0
